@@ -1,0 +1,301 @@
+"""
+Hospital Management System
+Subject : Python Programming (25CAH221)
+Author  : Jatin (UID 25BCD10214)
+"""
+
+import json
+import os
+from datetime import datetime
+
+DATA_FILE = "hospital_data.json"
+
+
+# ---------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------
+class Patient:
+    def __init__(self, pid, name, age, gender, disease, phone, admitted=True):
+        self.pid = pid
+        self.name = name
+        self.age = age
+        self.gender = gender
+        self.disease = disease
+        self.phone = phone
+        self.admitted = admitted
+        self.admit_date = datetime.now().strftime("%d-%m-%Y")
+        self.discharge_date = ""
+
+    def to_dict(self):
+        return self.__dict__
+
+    @staticmethod
+    def from_dict(d):
+        p = Patient(d["pid"], d["name"], d["age"], d["gender"],
+                    d["disease"], d["phone"], d["admitted"])
+        p.admit_date = d["admit_date"]
+        p.discharge_date = d["discharge_date"]
+        return p
+
+
+class Doctor:
+    def __init__(self, did, name, speciality, fee):
+        self.did = did
+        self.name = name
+        self.speciality = speciality
+        self.fee = fee
+
+    def to_dict(self):
+        return self.__dict__
+
+    @staticmethod
+    def from_dict(d):
+        return Doctor(d["did"], d["name"], d["speciality"], d["fee"])
+
+
+class Appointment:
+    def __init__(self, aid, pid, did, date, time):
+        self.aid = aid
+        self.pid = pid
+        self.did = did
+        self.date = date
+        self.time = time
+
+    def to_dict(self):
+        return self.__dict__
+
+    @staticmethod
+    def from_dict(d):
+        return Appointment(d["aid"], d["pid"], d["did"], d["date"], d["time"])
+
+
+# ---------------------------------------------------------------
+# Core system
+# ---------------------------------------------------------------
+class HospitalSystem:
+    ROOM_CHARGE_PER_DAY = 1500
+    MEDICINE_CHARGE = 800
+
+    def __init__(self):
+        self.patients = {}
+        self.doctors = {}
+        self.appointments = {}
+        self.load()
+
+    # ---------- persistence ----------
+    def save(self):
+        data = {
+            "patients": [p.to_dict() for p in self.patients.values()],
+            "doctors": [d.to_dict() for d in self.doctors.values()],
+            "appointments": [a.to_dict() for a in self.appointments.values()],
+        }
+        with open(DATA_FILE, "w") as f:
+            json.dump(data, f, indent=4)
+
+    def load(self):
+        if not os.path.exists(DATA_FILE):
+            return
+        with open(DATA_FILE) as f:
+            data = json.load(f)
+        for d in data["patients"]:
+            self.patients[d["pid"]] = Patient.from_dict(d)
+        for d in data["doctors"]:
+            self.doctors[d["did"]] = Doctor.from_dict(d)
+        for d in data["appointments"]:
+            self.appointments[d["aid"]] = Appointment.from_dict(d)
+
+    # ---------- id generation ----------
+    @staticmethod
+    def next_id(prefix, table):
+        if not table:
+            return f"{prefix}101"
+        last = max(int(key[1:]) for key in table)
+        return f"{prefix}{last + 1}"
+
+    # ---------- patients ----------
+    def add_patient(self, name, age, gender, disease, phone):
+        pid = self.next_id("P", self.patients)
+        self.patients[pid] = Patient(pid, name, age, gender, disease, phone)
+        self.save()
+        return pid
+
+    def search_patient(self, keyword):
+        keyword = keyword.lower()
+        return [p for p in self.patients.values()
+                if keyword in p.name.lower() or keyword == p.pid.lower()]
+
+    def discharge_patient(self, pid):
+        p = self.patients.get(pid)
+        if p is None:
+            return False, "Patient not found."
+        if not p.admitted:
+            return False, "Patient is already discharged."
+        p.admitted = False
+        p.discharge_date = datetime.now().strftime("%d-%m-%Y")
+        self.save()
+        return True, "Patient discharged successfully."
+
+    def delete_patient(self, pid):
+        if pid in self.patients:
+            del self.patients[pid]
+            # remove the patient's appointments too, to keep data consistent
+            self.appointments = {k: a for k, a in self.appointments.items()
+                                 if a.pid != pid}
+            self.save()
+            return True
+        return False
+
+    # ---------- doctors ----------
+    def add_doctor(self, name, speciality, fee):
+        did = self.next_id("D", self.doctors)
+        self.doctors[did] = Doctor(did, name, speciality, fee)
+        self.save()
+        return did
+
+    # ---------- appointments ----------
+    def book_appointment(self, pid, did, date, time):
+        if pid not in self.patients:
+            return None, "Invalid patient ID."
+        if did not in self.doctors:
+            return None, "Invalid doctor ID."
+        for a in self.appointments.values():
+            if a.did == did and a.date == date and a.time == time:
+                return None, "Doctor already booked at this slot."
+        aid = self.next_id("A", self.appointments)
+        self.appointments[aid] = Appointment(aid, pid, did, date, time)
+        self.save()
+        return aid, "Appointment booked."
+
+    # ---------- billing ----------
+    def generate_bill(self, pid, days):
+        if pid not in self.patients:
+            return None
+        consult = sum(self.doctors[a.did].fee
+                      for a in self.appointments.values() if a.pid == pid)
+        room = days * self.ROOM_CHARGE_PER_DAY
+        total = consult + room + self.MEDICINE_CHARGE
+        gst = round(total * 0.05, 2)
+        return {"consult": consult, "room": room,
+                "medicine": self.MEDICINE_CHARGE,
+                "gst": gst, "total": round(total + gst, 2)}
+
+
+# ---------------------------------------------------------------
+# User interface (console)
+# ---------------------------------------------------------------
+def read_int(msg):
+    while True:
+        try:
+            return int(input(msg))
+        except ValueError:
+            print("  Please enter a valid number.")
+
+
+def show_patients(items):
+    if not items:
+        print("  No records found.")
+        return
+    print(f"{'ID':<6}{'Name':<16}{'Age':<5}{'Sex':<5}{'Disease':<14}{'Status':<11}")
+    print("-" * 57)
+    for p in items:
+        status = "Admitted" if p.admitted else "Discharged"
+        print(f"{p.pid:<6}{p.name:<16}{p.age:<5}{p.gender:<5}{p.disease:<14}{status:<11}")
+
+
+def menu():
+    print("\n========== HOSPITAL MANAGEMENT SYSTEM ==========")
+    print(" 1. Add Patient           6. Book Appointment")
+    print(" 2. View All Patients     7. View Appointments")
+    print(" 3. Search Patient        8. Generate Bill")
+    print(" 4. Add Doctor            9. Discharge Patient")
+    print(" 5. View Doctors         10. Delete Patient")
+    print(" 0. Exit")
+    print("=================================================")
+
+
+def main():
+    hms = HospitalSystem()
+    while True:
+        menu()
+        ch = read_int("Enter your choice: ")
+
+        if ch == 1:
+            name = input("Name: ")
+            age = read_int("Age: ")
+            gender = input("Gender (M/F): ").upper()
+            disease = input("Disease: ")
+            phone = input("Phone: ")
+            pid = hms.add_patient(name, age, gender, disease, phone)
+            print(f"  Patient added. Patient ID = {pid}")
+
+        elif ch == 2:
+            show_patients(list(hms.patients.values()))
+
+        elif ch == 3:
+            key = input("Enter name or patient ID: ")
+            show_patients(hms.search_patient(key))
+
+        elif ch == 4:
+            name = input("Doctor name: ")
+            spec = input("Speciality: ")
+            fee = read_int("Consultation fee: ")
+            did = hms.add_doctor(name, spec, fee)
+            print(f"  Doctor added. Doctor ID = {did}")
+
+        elif ch == 5:
+            print(f"{'ID':<6}{'Name':<18}{'Speciality':<18}{'Fee':<6}")
+            print("-" * 48)
+            for d in hms.doctors.values():
+                print(f"{d.did:<6}{d.name:<18}{d.speciality:<18}{d.fee:<6}")
+
+        elif ch == 6:
+            pid = input("Patient ID: ")
+            did = input("Doctor ID: ")
+            date = input("Date (DD-MM-YYYY): ")
+            time = input("Time (HH:MM): ")
+            aid, msg = hms.book_appointment(pid, did, date, time)
+            print(f"  {msg}" + (f" Appointment ID = {aid}" if aid else ""))
+
+        elif ch == 7:
+            print(f"{'ID':<6}{'Patient':<16}{'Doctor':<18}{'Date':<12}{'Time':<6}")
+            print("-" * 58)
+            for a in hms.appointments.values():
+                print(f"{a.aid:<6}{hms.patients[a.pid].name:<16}"
+                      f"{hms.doctors[a.did].name:<18}{a.date:<12}{a.time:<6}")
+
+        elif ch == 8:
+            pid = input("Patient ID: ")
+            days = read_int("Number of days admitted: ")
+            bill = hms.generate_bill(pid, days)
+            if bill is None:
+                print("  Patient not found.")
+            else:
+                print("\n------------- BILL -------------")
+                print(f"Patient        : {hms.patients[pid].name}")
+                print(f"Consultation   : Rs. {bill['consult']}")
+                print(f"Room charges   : Rs. {bill['room']}")
+                print(f"Medicines      : Rs. {bill['medicine']}")
+                print(f"GST (5%)       : Rs. {bill['gst']:.2f}")
+                print(f"TOTAL PAYABLE  : Rs. {bill['total']:.2f}")
+                print("--------------------------------")
+
+        elif ch == 9:
+            ok, msg = hms.discharge_patient(input("Patient ID: "))
+            print(f"  {msg}")
+
+        elif ch == 10:
+            if hms.delete_patient(input("Patient ID: ")):
+                print("  Record deleted.")
+            else:
+                print("  Patient not found.")
+
+        elif ch == 0:
+            print("Thank you for using the Hospital Management System.")
+            break
+
+        else:
+            print("  Invalid choice. Try again.")
+
+
+if __name__ == "__main__":
+    main()
